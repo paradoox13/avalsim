@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: shop
+          POSTGRES_PASSWORD: shop
+          POSTGRES_DB: shop
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U shop" --health-interval 10s
+          --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://shop:shop@localhost:5432/shop?schema=public
+      REDIS_URL: redis://localhost:6379
+      SESSION_SECRET: ci-session-secret-must-be-at-least-32-characters
+      CRON_SECRET: ci-cron-secret
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: نصب وابستگی‌ها
+        run: npm ci
+
+      - name: اعتبارسنجی اسکیمای Prisma
+        run: npx prisma validate
+
+      - name: بررسی نوع‌ها (TypeScript)
+        run: npx tsc --noEmit
+
+      - name: اجرای مایگریشن‌ها روی دیتابیس تست
+        run: npx prisma migrate deploy
+
+      - name: seed دیتابیس تست
+        run: npx prisma db seed
+
+      - name: اجرای تست‌ها
+        run: npx vitest run --reporter=verbose
+
+      - name: ساخت قالب‌های اکسل (اعتبارسنجی round-trip)
+        run: npm run excel:template
+
+      - name: بیلد production
+        run: npx next build

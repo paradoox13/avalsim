@@ -1,0 +1,143 @@
+# ---------------------------------------------------------------------------
+#  اجرای کامل فروشگاه با Nginx (SSL)، PostgreSQL، Redis، بکاپ خودکار و Uptime Kuma
+#  اجرا:  docker compose up -d --build
+# ---------------------------------------------------------------------------
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: simshop-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-shop}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD را در .env تنظیم کنید}
+      POSTGRES_DB: ${POSTGRES_DB:-shop}
+      # برای پشتیبانی بهتر از متن فارسی
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C.UTF-8"
+      TZ: Asia/Tehran
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-shop} -d ${POSTGRES_DB:-shop}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [simshop]
+    # پورت به بیرون باز نمی‌شود؛ فقط شبکه‌ی داخلی داکر دسترسی دارد
+    expose: ["5432"]
+
+  redis:
+    image: redis:7-alpine
+    container_name: simshop-redis
+    restart: unless-stopped
+    command: >
+      redis-server --appendonly yes
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD را در .env تنظیم کنید}
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [simshop]
+    expose: ["6379"]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: simshop-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-shop}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shop}?schema=public
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET را تنظیم کنید}
+      CRON_SECRET: ${CRON_SECRET:?CRON_SECRET را تنظیم کنید}
+      NEXT_PUBLIC_APP_URL: https://${SHOP_DOMAIN:?SHOP_DOMAIN را تنظیم کنید}
+      BCRYPT_COST: ${BCRYPT_COST:-12}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
+      RUN_SEED: ${RUN_SEED:-true}
+      TZ: Asia/Tehran
+    networks: [simshop]
+    expose: ["3000"]
+    volumes:
+      - uploads:/app/public/uploads
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: simshop-nginx
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SHOP_DOMAIN: ${SHOP_DOMAIN:?SHOP_DOMAIN را تنظیم کنید}
+    volumes:
+      - ./nginx/shop.conf.template:/etc/nginx/templates/shop.conf.template:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot
+      - nginx-cache:/var/cache/nginx
+    networks: [simshop]
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: simshop-certbot
+    restart: unless-stopped
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    # تمدید خودکار هر ۱۲ ساعت بررسی می‌شود
+    entrypoint: >
+      sh -c "trap exit TERM;
+      while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+    networks: [simshop]
+
+  backup:
+    image: postgres:16-alpine
+    container_name: simshop-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-shop}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-shop}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      # پشتیبان‌گیری هر شب ساعت ۳ بامداد به وقت تهران
+      BACKUP_CRON: ${BACKUP_CRON:-0 3 * * *}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+    entrypoint: >
+      sh -c "echo \"$${BACKUP_CRON} /bin/sh /usr/local/bin/backup.sh >> /backups/backup.log 2>&1\" | crontab - && crond -f -l 8"
+    networks: [simshop]
+
+  uptime:
+    image: louislam/uptime-kuma:1
+    container_name: simshop-uptime
+    restart: unless-stopped
+    volumes:
+      - uptimedata:/app/data
+    ports:
+      - "127.0.0.1:3001:3001"
+    networks: [simshop]
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:
+  nginx-cache:
+  uptimedata:
+
+networks:
+  simshop:
+    driver: bridge

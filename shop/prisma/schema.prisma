@@ -1,0 +1,705 @@
+// ---------------------------------------------------------------------------
+//  SimShop — اسکیمای دیتابیس فروشگاه (PostgreSQL + Prisma)
+//  واحد پول: تومان (BigInt برای پشتیبانی از مبالغ بزرگ)
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================  ENUMS  =====================
+
+enum UserStatus {
+  ACTIVE
+  PENDING
+  SUSPENDED
+}
+
+enum OwnerType {
+  PLATFORM
+  RESELLER
+}
+
+enum PhoneStatus {
+  AVAILABLE // موجود و قابل فروش
+  RESERVED // رزرو موقت در فرآیند پرداخت (قفل فروش همزمان)
+  SOLD // فروخته شده — از سایت مخفی می‌شود
+  INACTIVE // غیرفعال توسط ادمین/نماینده
+}
+
+enum ProductType {
+  PHONE_NUMBER
+  MODEM
+  ACTIVATION_CODE
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PROCESSING
+  AWAITING_PHYSICAL_DELIVERY // در انتظار ارسال فیزیکی (کد فعال‌سازی / مودم)
+  SHIPPED
+  DELIVERED
+  CANCELED
+  REFUNDED
+  FAILED
+}
+
+enum PaymentGateway {
+  ZARINPAL
+  IDPAY
+  NEXTPAY
+  MANUAL
+}
+
+enum PaymentStatus {
+  INITIATED
+  CALLBACK_RECEIVED
+  VERIFIED
+  FAILED
+  CANCELED
+}
+
+enum SettlementStatus {
+  PENDING
+  APPROVED
+  PAID
+  REJECTED
+}
+
+enum ImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+enum SmsStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+}
+
+enum SettingType {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+  SECRET
+}
+
+enum ContactStatus {
+  NEW
+  READ
+  ANSWERED
+  ARCHIVED
+}
+
+// =====================  USERS / RBAC  =====================
+
+model User {
+  id           String     @id @default(cuid())
+  // نام کاربری برای ورود نمایندگان/ادمین‌ها
+  username     String?    @unique
+  email        String?    @unique
+  phone        String     @unique
+  fullName     String
+  passwordHash String
+  status       UserStatus @default(ACTIVE)
+  // کلید نقش برای بررسی سریع در middleware (منبع حقیقت: roleId)
+  roleKey      String     @default("CUSTOMER")
+  roleId       String?
+  role         Role?      @relation(fields: [roleId], references: [id], onDelete: SetNull)
+
+  // امنیت
+  twoFactorEnabled Boolean   @default(false)
+  twoFactorSecret  String?
+  tokenVersion     Int       @default(0) // برای باطل‌کردن همه‌ی توکن‌ها
+  lastLoginAt      DateTime?
+  lastLoginIp      String?
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+
+  // پروفایل مشتری
+  nationalId      String?
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+
+  resellerProfile    ResellerProfile?
+  orders             Order[]           @relation("CustomerOrders")
+  approvedResellers  ResellerProfile[] @relation("ResellerApprover")
+  phoneNumbers       PhoneNumber[]
+  modems             Modem[]
+  carts              Cart[]
+  auditLogs          AuditLog[]
+  smsLogs            SmsLog[]
+  importLogs         ExcelImportLog[]
+  settlementsCreated Settlement[]      @relation("SettlementCreator")
+  settingsUpdated    Setting[]         @relation("SettingUpdater")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([roleKey])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  key         String           @unique // CUSTOMER | RESELLER | ADMIN | SUPER_ADMIN | ...
+  label       String
+  description String?
+  isSystem    Boolean          @default(false)
+  level       Int              @default(10) // بزرگ‌تر = دسترسی بیشتر
+  users       User[]
+  permissions RolePermission[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Permission {
+  id        String           @id @default(cuid())
+  key       String           @unique // مثال: products.write
+  label     String
+  group     String
+  roles     RolePermission[]
+  createdAt DateTime         @default(now())
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+// =====================  OPERATORS  =====================
+
+model Operator {
+  id        String  @id @default(cuid())
+  code      String  @unique // MCI | IRANCELL | RIGHTEL | APTEL | SHATEL | SAMANTEL | TALIA | OTHER
+  name      String // نام فارسی
+  nameEn    String
+  slug      String  @unique
+  color     String  @default("#0ea5e9")
+  logoUrl   String?
+  isActive  Boolean @default(true)
+  sortOrder Int     @default(0)
+
+  phoneNumbers     PhoneNumber[]
+  modems           Modem[]
+  prefixes         OperatorPrefix[]
+  activationPrices ActivationCodePrice[]
+  orderItems       OrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+}
+
+model OperatorPrefix {
+  id         String   @id @default(cuid())
+  prefix     String   @unique // "0912"
+  operatorId String
+  operator   Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+
+  @@index([operatorId])
+}
+
+// =====================  PRODUCTS  =====================
+
+model PhoneNumber {
+  id         String   @id @default(cuid())
+  msisdn     String   @unique // نرمال‌شده: 09121234567 (بدون +98/0098/فاصله)
+  operatorId String
+  operator   Operator @relation(fields: [operatorId], references: [id])
+
+  // فیلدهای denormalize برای فیلتر/جستجوی سریع
+  prefix String // 0912
+  suffix String // 4567
+  middle String // 1234 (بین پیش‌شماره و پسوند)
+  length Int         @default(11)
+  price  BigInt
+  status PhoneStatus @default(AVAILABLE)
+
+  // ویژگی‌های هوشمند شماره (برای فیلترهای «رند/تکراری/متوالی»)
+  isRond       Boolean @default(false)
+  isSequential Boolean @default(false)
+  isRepeated   Boolean @default(false)
+  isPalindrome Boolean @default(false)
+  rondScore    Int     @default(0) // امتیاز زیبایی ۰..۱۰۰ (مرتب‌سازی محبوب‌ترین/رندترین)
+
+  ownerType  OwnerType @default(PLATFORM)
+  resellerId String?
+  reseller   User?     @relation(fields: [resellerId], references: [id], onDelete: SetNull)
+
+  description String?
+  views       Int     @default(0)
+
+  // رزرو موقت (جلوگیری از فروش همزمان)
+  reservedAt      DateTime?
+  reservedUntil   DateTime?
+  reservedByToken String?
+
+  soldAt      DateTime?
+  soldOrderId String?
+  orderItem   OrderItem?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([status, price])
+  @@index([status, createdAt])
+  @@index([operatorId, status, price])
+  @@index([prefix, status])
+  @@index([suffix])
+  @@index([resellerId, status])
+  @@index([ownerType, status])
+  @@index([isRond, status, price])
+  @@index([isSequential, status])
+  @@index([isRepeated, status])
+  @@index([rondScore])
+  @@index([reservedUntil])
+  @@index([soldOrderId])
+}
+
+model Modem {
+  id        String @id @default(cuid())
+  sku       String // کد کالا (یکتا در محدوده‌ی مالک — dedupeKey یکتای سراسری)
+  // کلید یکتای محاسبه‌شده: PLATFORM:brand:model | R:<resellerId>:brand:model
+  dedupeKey String @unique
+
+  brand    String
+  model    String
+  title    String
+  price    BigInt
+  stock    Int     @default(0)
+  isActive Boolean @default(true)
+
+  operatorId String?
+  operator   Operator? @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+
+  imageUrl    String?
+  gallery     String[] @default([])
+  description String?
+  specs       Json?
+  warranty    String?
+  views       Int      @default(0)
+
+  ownerType  OwnerType @default(PLATFORM)
+  resellerId String?
+  reseller   User?     @relation(fields: [resellerId], references: [id], onDelete: SetNull)
+
+  orderItems OrderItem[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([isActive, price])
+  @@index([brand])
+  @@index([stock])
+  @@index([resellerId, isActive])
+  @@index([ownerType, isActive])
+}
+
+model ActivationCodePrice {
+  id         String   @id @default(cuid())
+  operatorId String
+  operator   Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+
+  // قیمت پله‌ای: بازه‌ی تعداد
+  minQty      Int     @default(1)
+  maxQty      Int? // null = بدون سقف
+  unitPrice   BigInt
+  isActive    Boolean @default(true)
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([operatorId, minQty])
+  @@index([operatorId, isActive])
+}
+
+// =====================  CART  =====================
+
+model Cart {
+  id        String     @id @default(cuid())
+  token     String     @unique // شناسه در کوکی سبد خرید (مهمان)
+  userId    String?
+  user      User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  items     CartItem[]
+  expiresAt DateTime
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model CartItem {
+  id          String      @id @default(cuid())
+  cartId      String
+  cart        Cart        @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productType ProductType
+
+  phoneNumberId String?
+  modemId       String?
+  operatorId    String?
+
+  quantity      Int       @default(1)
+  unitPrice     BigInt
+  title         String
+  meta          Json?
+  // رزرو موقت برای آیتم‌های شماره
+  reservedUntil DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([cartId, productType, phoneNumberId, modemId, operatorId])
+  @@index([cartId])
+  @@index([reservedUntil])
+}
+
+// =====================  ORDERS  =====================
+
+model Order {
+  id           String @id @default(cuid())
+  orderNumber  String @unique // SH-14030812-000123
+  trackingCode String @unique // کد رهگیری مشتری
+
+  userId String?
+  user   User?   @relation("CustomerOrders", fields: [userId], references: [id], onDelete: SetNull)
+
+  customerName  String
+  customerPhone String
+  customerEmail String?
+  nationalId    String?
+
+  province   String?
+  city       String?
+  address    String?
+  postalCode String?
+  note       String?
+
+  type   ProductType?
+  status OrderStatus  @default(PENDING_PAYMENT)
+
+  subtotal BigInt @default(0)
+  discount BigInt @default(0)
+  tax      BigInt @default(0)
+  total    BigInt @default(0)
+
+  // جمع کمیسیون نمایندگان این سفارش (برای تسویه)
+  resellerCommission BigInt @default(0)
+
+  items    OrderItem[]
+  payments Payment[]
+  smsLogs  SmsLog[]
+
+  paidAt               DateTime?
+  reservationExpiresAt DateTime?
+  shippedAt            DateTime?
+  deliveredAt          DateTime?
+  canceledAt           DateTime?
+
+  // اطلاعات ارسال
+  shippingCarrier  String?
+  shippingTracking String?
+
+  ipAddress String?
+  userAgent String?
+  // توکن سبد خریدی که این سفارش از آن ساخته شده — برای پاک‌سازی سبد پس از پرداخت موفق
+  cartToken String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@index([customerPhone])
+  @@index([createdAt])
+  @@index([reservationExpiresAt])
+}
+
+model OrderItem {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  productType ProductType
+
+  // اسنپ‌شات محصول (حتی بعد از حذف محصول، سفارش سالم می‌ماند)
+  title      String
+  unitPrice  BigInt
+  quantity   Int    @default(1)
+  totalPrice BigInt
+
+  phoneNumberId String?      @unique // هر شماره فقط یک‌بار قابل فروش است
+  phoneNumber   PhoneNumber? @relation(fields: [phoneNumberId], references: [id], onDelete: SetNull)
+
+  modemId String?
+  modem   Modem?  @relation(fields: [modemId], references: [id], onDelete: SetNull)
+
+  operatorId String?
+  operator   Operator? @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+
+  // مالک محصول و کمیسیون (برای تسویه با نماینده)
+  ownerType        OwnerType @default(PLATFORM)
+  resellerId       String?
+  commissionRate   Int       @default(0) // basis point: 500 = ۵٪
+  commissionAmount BigInt    @default(0)
+
+  deliveredAt DateTime?
+  meta        Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([resellerId])
+  @@index([productType])
+  @@index([modemId])
+}
+
+model Payment {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  gateway PaymentGateway
+  amount  BigInt
+  status  PaymentStatus  @default(INITIATED)
+
+  authority String? @unique // شناسه تراکنش درگاه (Authority / token / id)
+  refId     String? // شماره پیگیری بانکی
+  cardPan   String?
+  fee       BigInt?
+
+  requestPayload Json?
+  verifyPayload  Json?
+  errorMessage   String?
+
+  verifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([orderId])
+  @@index([status, createdAt])
+  @@index([refId])
+}
+
+// =====================  RESELLERS  =====================
+
+model ResellerProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  code       String  @unique // RSL-0001
+  shopName   String
+  nationalId String?
+  phone      String
+  province   String?
+  city       String?
+  address    String?
+  postalCode String?
+  // اطلاعات تسویه
+  shaba      String?
+  cardNumber String?
+  bankName   String?
+  holderName String?
+
+  // کمیسیون بر حسب basis point (۵٪ => 500)
+  commissionRate Int @default(500)
+
+  status String @default("PENDING_APPROVAL") // PENDING_APPROVAL | APPROVED | SUSPENDED
+
+  balance         BigInt @default(0) // مانده قابل تسویه
+  totalSales      BigInt @default(0)
+  totalCommission BigInt @default(0)
+  totalSettled    BigInt @default(0)
+
+  contractAcceptedAt DateTime?
+  approvedById       String?
+  approvedBy         User?     @relation("ResellerApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedAt         DateTime?
+  notes              String?
+
+  settlements Settlement[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+model Settlement {
+  id         String          @id @default(cuid())
+  resellerId String
+  reseller   ResellerProfile @relation(fields: [resellerId], references: [id], onDelete: Cascade)
+
+  amount       BigInt
+  status       SettlementStatus @default(PENDING)
+  itemsCount   Int              @default(0)
+  periodStart  DateTime?
+  periodEnd    DateTime?
+  trackingCode String?
+  note         String?
+  paidAt       DateTime?
+  createdById  String?
+  createdBy    User?            @relation("SettlementCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([resellerId, status])
+  @@index([status, createdAt])
+}
+
+// =====================  LOGS / SETTINGS  =====================
+
+model ExcelImportLog {
+  id          String       @id @default(cuid())
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type        ProductType
+  fileName    String
+  fileSize    Int          @default(0)
+  totalRows   Int          @default(0)
+  successRows Int          @default(0)
+  failedRows  Int          @default(0)
+  status      ImportStatus @default(PENDING)
+  errors      Json?
+  createdAt   DateTime     @default(now())
+  finishedAt  DateTime?
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+model SmsLog {
+  id      String  @id @default(cuid())
+  userId  String?
+  user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  mobile   String
+  template String?
+  message  String
+  provider String
+  status   SmsStatus @default(QUEUED)
+
+  providerMessageId String?
+  cost              Int?
+  response          Json?
+  errorMessage      String?
+
+  sentAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([status, createdAt])
+  @@index([mobile])
+  @@index([orderId])
+}
+
+model Setting {
+  id          String      @id @default(cuid())
+  key         String      @unique
+  value       String
+  type        SettingType @default(STRING)
+  group       String      @default("general")
+  label       String
+  description String?
+  isPublic    Boolean     @default(false) // آیا در فرانت‌اند قابل خواندن است؟
+  updatedById String?
+  updatedBy   User?       @relation("SettingUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  updatedAt   DateTime    @updatedAt
+  createdAt   DateTime    @default(now())
+
+  @@index([group])
+  @@index([isPublic])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  actorRole String?
+  action    String // CREATE | UPDATE | DELETE | LOGIN | ...
+  entity    String // PhoneNumber | Order | Setting | ...
+  entityId  String?
+  before    Json?
+  after     Json?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@index([createdAt])
+}
+
+model ContactMessage {
+  id         String        @id @default(cuid())
+  name       String
+  phone      String
+  email      String?
+  subject    String?
+  message    String
+  status     ContactStatus @default(NEW)
+  ip         String?
+  answer     String?
+  createdAt  DateTime      @default(now())
+  answeredAt DateTime?
+
+  @@index([status, createdAt])
+}
+
+// صفحات محتوایی: درباره ما، قوانین، حریم خصوصی، سوالات متداول
+model ContentPage {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  body        String // Markdown
+  kind        String   @default("page") // page | faq
+  isPublished Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model LoginAttempt {
+  id         String   @id @default(cuid())
+  identifier String // username/phone/email
+  ip         String?
+  userAgent  String?
+  success    Boolean  @default(false)
+  reason     String?
+  createdAt  DateTime @default(now())
+
+  @@index([identifier, createdAt])
+  @@index([ip, createdAt])
+}
+
+// شمارنده‌ی اتمی برای شماره‌گذاری سفارش و سایر شناسه‌های ترتیبی
+model Counter {
+  key       String   @id
+  value     Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
