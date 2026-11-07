@@ -212,13 +212,13 @@ shop/
 
 ```bash
 # روی سرور (اوبونتو ۲۲/۲۴)
-git clone <repo> /var/www/simshop && cd /var/www/simshop
+git clone https://github.com/paradoox13/avalsim.git /var/www/avalsim
+cd /var/www/avalsim/shop                   # سایت داخل پوشه‌ی shop مخزن است
 cp .env.example .env && nano .env          # SHOP_DOMAIN=shop.example.ir و بقیه مقادیر
-docker compose up -d postgres redis
 
-# صدور گواهی SSL
+# صدور گواهی SSL (standalone — پورت ۸۰ باید آزاد باشد و nginx هنوز بالا نیامده)
 mkdir -p certbot/www certbot/conf
-docker compose run --rm certbot certonly --webroot -w /var/www/certbot \
+docker compose run --rm --entrypoint certbot -p 80:80 certbot certonly --standalone \
   -d shop.example.ir --email info@example.ir --agree-tos --no-eff-email
 
 docker compose up -d --build               # اپ + nginx + بکاپ + مانیتورینگ

@@ -17,7 +17,11 @@ ENV DOCKER_BUILD=1
 # متغیرهای ساختگی فقط برای عبور از مرحله‌ی بیلد (مقادیر واقعی در زمان اجرا تزریق می‌شوند)
 ENV DATABASE_URL="postgresql://build:build@localhost:5432/build"
 ENV SESSION_SECRET="build-time-placeholder-secret-32-characters"
-RUN npx prisma generate && npx next build
+RUN npx prisma generate
+# seed را به یک فایل JS مستقل کامپایل می‌کنیم تا در تصویر نهایی (بدون tsx و بدون سورس TypeScript) اجرا شود
+RUN ./node_modules/.bin/esbuild prisma/seed.ts --bundle --platform=node --target=node20 \
+    --format=cjs --outfile=prisma/seed.cjs --external:@prisma/client
+RUN npx next build
 
 # ---------- مرحله ۳: اجرا (تصویر کوچک standalone) ----------
 FROM node:20-alpine AS runner

@@ -12,8 +12,8 @@
 ## ۲. استقرار در ۶ گام
 
 ```bash
-# ۱) دریافت کد
-git clone <repo> simshop && cd simshop
+# ۱) دریافت کد (سایت داخل پوشه‌ی shop مخزن است)
+git clone https://github.com/paradoox13/avalsim.git avalsim && cd avalsim/shop
 
 # ۲) ساخت فایل محیطی
 cp .env.example .env
@@ -22,10 +22,11 @@ nano .env     # مقادیر بخش ۳ را پر کنید
 # ۳) رمزهای امنیتی
 openssl rand -base64 48        # → SESSION_SECRET
 
-# ۴) نخستین اجرای SSL (صدور گواهی Let's Encrypt)
+# ۴) نخستین صدور گواهی SSL — قبل از بالا آوردن nginx
+#    nginx بدون فایل گواهی بالا نمی‌آید، پس گواهی اول در حالت standalone گرفته می‌شود
+#    و پورت ۸۰ باید آزاد باشد (هیچ سرویس دیگری روی آن نباشد)
 mkdir -p certbot/conf certbot/www
-docker compose up -d nginx
-docker compose run --rm certbot certonly --webroot -w /var/www/certbot \
+docker compose run --rm --entrypoint certbot -p 80:80 certbot certonly --standalone \
   -d shop.example.ir --email admin@example.ir --agree-tos --no-eff-email
 
 # ۵) بالا آوردن کل استک
@@ -36,7 +37,7 @@ curl -fsS https://shop.example.ir/api/health
 docker compose logs -f app
 ```
 
-> در نخستین اجرا، `docker-entrypoint.sh` مایگریشن‌ها را با `prisma migrate deploy` اعمال و با `RUN_SEED=true` داده‌ی پایه (نقش‌ها، دسترسی‌ها، اپراتورها، تنظیمات، حساب سوپر‌ادمین) را ایجاد می‌کند.
+> در نخستین اجرا، `docker-entrypoint.sh` مایگریشن‌ها را با `prisma migrate deploy` اعمال و با `RUN_SEED=true` داده‌ی پایه (نقش‌ها، دسترسی‌ها، اپراتورها، تنظیمات، حساب سوپر‌ادمین) را ایجاد می‌کند. seed در مرحله‌ی ساخت ایمیج به `prisma/seed.cjs` کامپایل می‌شود و با `node` اجرا می‌گردد، پس ایمیج نهایی به `tsx` یا سورس TypeScript نیازی ندارد.
 
 ### بخش‌های ضروری `.env`
 ```dotenv

@@ -1,0 +1,21 @@
+# فایل‌ها و پوشه‌هایی که نباید وارد build context / ایمیج شوند
+node_modules
+.next
+out
+coverage
+.git
+.gitignore
+.env
+.env.local
+.env.production
+.env.*.local
+backups
+uploads
+certbot
+*.log
+docs
+tests
+samples
+README.md
+tsconfig.tsbuildinfo
+prisma/seed.cjs

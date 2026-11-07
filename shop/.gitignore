@@ -16,3 +16,5 @@ next-env.d.ts
 /backups/
 /uploads/
 prisma/*.db
+# خروجی کامپایل seed در مرحله‌ی ساخت ایمیج داکر
+prisma/seed.cjs

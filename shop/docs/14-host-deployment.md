@@ -67,8 +67,9 @@ shop.example.ir.   A   5.x.x.x      # IP سرور شما
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER && newgrp docker
 
-# ۲) دریافت کد
-git clone <repo-url> /opt/simshop && cd /opt/simshop
+# ۲) دریافت کد (سایت داخل پوشه‌ی shop مخزن است)
+git clone https://github.com/paradoox13/avalsim.git /opt/avalsim
+cd /opt/avalsim/shop
 
 # ۳) ساخت فایل محیطی
 cp .env.example .env
@@ -76,10 +77,11 @@ openssl rand -base64 48          # خروجی → SESSION_SECRET
 openssl rand -hex 24             # خروجی → CRON_SECRET
 nano .env
 
-# ۴) صدور گواهی SSL اولیه (قبل از بالا آوردن کل استک)
+# ۴) صدور گواهی SSL اولیه — قبل از بالا آوردن nginx
+#    nginx بدون فایل گواهی بالا نمی‌آید، پس گواهی اول در حالت standalone گرفته می‌شود
+#    (پورت ۸۰ باید آزاد باشد؛ هنوز هیچ کانتینری روی آن بالا نیامده)
 mkdir -p certbot/conf certbot/www
-docker compose up -d nginx
-docker compose run --rm certbot certonly --webroot -w /var/www/certbot \
+docker compose run --rm --entrypoint certbot -p 80:80 certbot certonly --standalone \
   -d shop.example.ir --email admin@example.ir --agree-tos --no-eff-email
 
 # ۵) بالا آوردن همه‌چیز (entrypoint خودش migrate deploy + seed را اجرا می‌کند)
@@ -109,7 +111,7 @@ BACKUP_KEEP_DAYS=14
 
 **به‌روزرسانی نسخه در آینده:**
 ```bash
-cd /opt/simshop && git pull
+cd /opt/avalsim/shop && git pull
 docker compose build app
 docker compose up -d app        # entrypoint خودکار migrate deploy می‌زند
 docker compose exec nginx nginx -s reload
@@ -150,9 +152,10 @@ SQL
 ### ۳-۳) آوردن کد و وابستگی‌ها
 
 ```bash
-sudo mkdir -p /var/www/simshop && sudo chown -R $USER:$USER /var/www/simshop
-git clone <repo-url> /var/www/simshop && cd /var/www/simshop
-npm ci                    # دقیقاً بر اساس package-lock.json
+sudo mkdir -p /var/www/avalsim && sudo chown -R $USER:$USER /var/www/avalsim
+git clone https://github.com/paradoox13/avalsim.git /var/www/avalsim
+cd /var/www/avalsim/shop         # سایت داخل پوشه‌ی shop است
+npm ci                           # دقیقاً بر اساس package-lock.json
 ```
 
 > اگر رم سرور کم است، روی سیستم خودتان `npm run build` بزنید و پوشه‌های `.next` و
@@ -184,7 +187,7 @@ chmod 600 .env     # فقط کاربر سرویس بتواند بخواند
 ### ۳-۵) ساخت جداول، داده‌ی پایه و بیلد
 
 ```bash
-cd /var/www/simshop
+cd /var/www/avalsim/shop
 
 # اعمال مایگریشن‌ها روی دیتابیس خالی
 npx prisma generate
@@ -204,7 +207,7 @@ npm run build
 ### ۳-۶) اجرای دائمی با PM2
 
 ```bash
-cd /var/www/simshop
+cd /var/www/avalsim/shop
 pm2 start npm --name simshop -- run start
 pm2 startup            # دستور خروجی را کپی و اجرا کنید
 pm2 save
@@ -252,7 +255,7 @@ rate-limit سخت‌گیرانه روی `/api/auth/*` و بستن دسترسی �
 
 ```bash
 # در Terminal هاست یا با SSH
-cd ~/simshop
+cd ~/avalsim/shop
 npm ci
 cp .env.example .env      # سپس از File Manager مقدارها را وارد کنید
 npx prisma generate
@@ -305,7 +308,7 @@ crontab -e
 ### ۵-۴) اجرای اسموک تست (بررسی واقعی بعد از هر دیپلوی)
 
 ```bash
-cd /var/www/simshop
+cd /var/www/avalsim/shop
 BASE_URL=https://shop.example.ir \
 ADMIN_USERNAME=superadmin \
 ADMIN_PASSWORD='رمزی که گذاشتید' \
@@ -328,13 +331,13 @@ npm run smoke
 
 ```bash
 # دستی — خروجی در ./backups/shop-YYYYMMDD-HHMM.sql.gz
-cd /var/www/simshop
+cd /var/www/avalsim/shop
 BACKUP_DIR=./backups PGHOST=127.0.0.1 PGUSER=shop PGPASSWORD='رمز-قوی' \
   PGDATABASE=shop BACKUP_KEEP_DAYS=14 ./scripts/backup.sh
 
 # زمان‌بندی خودکار (هر شب ساعت ۳ بامداد)
 crontab -e
-0 3 * * * cd /var/www/simshop && BACKUP_DIR=./backups PGHOST=127.0.0.1 PGUSER=shop PGPASSWORD='رمز-قوی' PGDATABASE=shop ./scripts/backup.sh >> backups/backup.log 2>&1
+0 3 * * * cd /var/www/avalsim/shop && BACKUP_DIR=./backups PGHOST=127.0.0.1 PGUSER=shop PGPASSWORD='رمز-قوی' PGDATABASE=shop ./scripts/backup.sh >> backups/backup.log 2>&1
 
 # بازیابی
 gunzip -c backups/shop-20261015-0300.sql.gz | \
@@ -383,7 +386,7 @@ gunzip -c backups/shop-20261015-0300.sql.gz | \
 ## ۸) به‌روزرسانی نسخه در آینده
 
 ```bash
-cd /var/www/simshop
+cd /var/www/avalsim/shop
 ./scripts/backup.sh            # ۱) بکاپ قبل از هر تغییر
 git pull                       # ۲) کد جدید
 npm ci                         # ۳) وابستگی‌ها
