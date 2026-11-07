@@ -221,17 +221,45 @@ pm2 logs simshop       # مشاهده‌ی لاگ
 
 ### ۳-۷) Nginx + SSL
 
+قالب `nginx/shop.conf.template` برای مسیر داکر نوشته شده؛ در مسیر بدون داکر سه چیز را باید
+تطبیق دهید: `${SHOP_DOMAIN}` ← دامنه‌ی واقعی، `server app:3000` ← `127.0.0.1:3000` و
+وجود فایل `proxy_headers.inc` در مسیر include.
+
+**گام ۱ — فایل هدرهای پروکسی:**
 ```bash
-sudo cp nginx/shop.conf.template /etc/nginx/sites-available/simshop.conf
-sudo nano /etc/nginx/sites-available/simshop.conf   # shop.example.ir و proxy_pass را چک کنید
-sudo ln -s /etc/nginx/sites-available/simshop.conf /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d shop.example.ir
+sudo cp nginx/proxy_headers.inc /etc/nginx/conf.d/proxy_headers.inc
 ```
 
-قالب `nginx/shop.conf.template` شامل: پروکسی به اپ، کش یک‌ساله برای `/_next/static`،
-rate-limit سخت‌گیرانه روی `/api/auth/*` و بستن دسترسی به فایل‌های حساس است.
+**گام ۲ — کانفیگ موقت HTTP (بلوک HTTPS بدون گواهی بالا نمی‌آید، پس اول HTTP و گواهی):**
+```bash
+sudo tee /etc/nginx/sites-available/avalsim-shop.conf >/dev/null <<'CONF'
+server {
+    listen 80;
+    server_name shop.example.ir;
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        include /etc/nginx/conf.d/proxy_headers.inc;
+    }
+}
+CONF
+sudo ln -sf /etc/nginx/sites-available/avalsim-shop.conf /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot certonly --nginx -d shop.example.ir
+```
+
+**گام ۳ — جایگزینی با کانفیگ کامل (HTTPS، کش استاتیک، rate-limit):**
+```bash
+cd /var/www/avalsim/shop
+sudo sh -c "sed -e 's/\${SHOP_DOMAIN}/shop.example.ir/g' \
+  -e 's/server app:3000;/server 127.0.0.1:3000;/' \
+  nginx/shop.conf.template > /etc/nginx/sites-available/avalsim-shop.conf"
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+قالب شامل: پروکسی به اپ، کش یک‌ساله برای `/_next/static`، rate-limit سخت‌گیرانه روی
+`/api/auth/*`، هدرهای امنیتی و HSTS است.
 
 بررسی خودکار تمدید: `sudo certbot renew --dry-run`
 
